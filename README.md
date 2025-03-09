@@ -1,6 +1,6 @@
 # Team Information
 
-**Course:** _Al Programmeerproject - 011970_
+**Course:** _011970 AI Programmeerproject_
 
 **Semester:** Semester _2_, _2025_
 
