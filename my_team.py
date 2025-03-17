@@ -7,7 +7,7 @@
 # 
 # Attribution Information: The Pacman AI projects were developed at UC Berkeley.
 # The core projects and autograders were primarily created by John DeNero
-# (denero@cs.berkeley.edu) and Dan Klein (klein@cs.berkeley.edu)
+# (denero@cs.berkeley.edu) and Dan Klein (klein@cs.berkeley.edu).
 # Student side autograding was added by Brad Miller, Nick Hay, and
 # Pieter Abbeel (pabbeel@cs.berkeley.edu).
 
@@ -63,6 +63,7 @@ class ReflexCaptureAgent(CaptureAgent):
     def __init__(self, index, time_for_computing=.1):
         super().__init__(index, time_for_computing)
         self.start = None
+        self.previous_positions = []
 
     def register_initial_state(self, game_state):
         self.start = game_state.get_agent_position(self.index)
@@ -83,7 +84,6 @@ class ReflexCaptureAgent(CaptureAgent):
         best_actions = [a for a, v in zip(actions, values) if v == max_value]
 
         food_left = len(self.get_food(game_state).as_list())
-
         if food_left <= 2:
             best_dist = 9999
             best_action = None
@@ -96,7 +96,13 @@ class ReflexCaptureAgent(CaptureAgent):
                     best_dist = dist
             return best_action
 
+        my_pos = game_state.get_agent_state(self.index).get_position()
+        self.previous_positions.append(my_pos)
+        if len(self.previous_positions) > 10:  # Keep last 10 positions TODO: is 10 not too much?
+            self.previous_positions.pop(0)
+
         return random.choice(best_actions)
+
 
     def get_successor(self, game_state, action):
         """
@@ -140,107 +146,133 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
   A reflex agent that seeks food. This is an agent
   we give you to get an idea of what an offensive agent might look like,
   but it is by no means the best or only way to build an offensive agent.
-
-  Main Strategy:
-  - Wisselwerking tussen attacker en defender, als attacker wordt gegeten, wissel de rollen
-
-  Attacker Strategy:
-  - maximize food eaten (through food length)
-  - minimize risk of getting eaten
-  - Use capsules strategically
-
-  Specific strategies
-  - if two ghosts in a certain radius, immediately return to home base, but still avoid the ghosts
-  - take food gradually, first secure one single food pellet, then two, etc.
-  - if time is almost up and winning significantly, go to your half and defend
-  - if time is almost up and losing significantly, make both agents aggressors
-  - consider tracking distance to nearest food cluster (built on top of closest food)
-  - a longer path where more food is collected is preferrable to a shorter path with less food
-  - change strategies based on how much food is eaten on your side
-  - don't choose paths where un-scared ghosts travel (in relation to nearest food pellet), can be implemented with A*
-  - on_defense like in DefensiveReflexAgent to check if you are on your side or not
-  - as you are eating more food, the weight to return to your side increases
-  - as you are deeper into enemy territory, the weight to return to your side increases
-    """
+  """
 
     def get_features(self, game_state, action):
         features = util.Counter()
         successor = self.get_successor(game_state, action)
         food_list = self.get_food(successor).as_list()
-        features['successor_score'] = -len(food_list)  # self.get_score(successor)
         my_pos = successor.get_agent_state(self.index).get_position()
         my_state = successor.get_agent_state(self.index)
 
-        # Compute distance to the nearest food
-        if len(food_list) > 0:  # This should always be True,  but better safe than sorry
+        # GAME AWARENESS
+        score = self.get_score(successor)
+        features['score'] = score
+
+        # FOOD
+        current_food_list = self.get_food(game_state).as_list()
+        if len(current_food_list) > len(food_list):
+            features['distance_to_food'] = 0 # to stop going back and forth in front of food
+            features['eat_food'] = 10
+
+        if len(food_list) > 0:
             min_distance = min([self.get_maze_distance(my_pos, food) for food in food_list])
             features['distance_to_food'] = min_distance
 
+        # ENEMIES
         enemies = [successor.get_agent_state(i) for i in self.get_opponents(successor)]
-        scared_enemies = [enemy for enemy in enemies if
-                          enemy.scared_timer > 0 and enemy.get_position() is not None]
-        active_enemies = [enemy for enemy in enemies if
-                          enemy.scared_timer == 0 and enemy.get_position() is not None]
+        defenders = [enemy for enemy in enemies if enemy.get_position() is not None and not enemy.is_pacman]
+        invaders = [enemy for enemy in enemies if enemy.get_position() is not None and enemy.is_pacman]
+        scared_defenders = [defender for defender in defenders if defender.scared_timer > 0]
+        normal_defenders = [defender for defender in defenders if defender.scared_timer == 0]
 
+        invader_distances = [self.get_maze_distance(my_pos, invader.get_position()) for invader in invaders]
+        if invaders and not my_state.is_pacman:
+            features['invader_distance'] = min(invader_distances)
 
+        scared_defender_distances = [self.get_maze_distance(my_pos, ghost.get_position()) for ghost in scared_defenders]
+        if scared_defenders:
+            features['scared_defender_distance'] = min(scared_defender_distances)
 
-        # If scared enemies are nearby, go for them
-        if scared_enemies:
-            min_dist = min([self.get_maze_distance(my_pos, enemy.get_position()) for enemy in scared_enemies])
-            features['distance_to_scared_ghost'] = min_dist
-            features['eat_scared_ghost'] = 1 if min_dist == 0 else 0
-        else:
-            features['distance_to_scared_ghost'] = 0
-            features['eat_scared_ghost'] = 0
+        normal_defender_distances = [self.get_maze_distance(my_pos, ghost.get_position()) for ghost in normal_defenders]
+        if normal_defenders:
+            features['normal_defender_distance'] = min(normal_defender_distances)
 
-        # If defenders are nearby, avoid them
-        defenders = [a for a in enemies if a.is_pacman and a.get_position() is not None]
-        if len(defenders) > 0:
-            dists = [self.get_maze_distance(my_pos, a.get_position()) for a in defenders]
-            features['defender_distance'] = min(dists)
+        # The more food you carry, the more you should stay away from ghosts
+        if my_state.num_carrying > 0:
+            features['normal_defender_distance'] *= my_state.num_carrying * 1.2
 
-        # If active enemies are nearby, avoid them
-        if active_enemies:
-            min_distance = min([self.get_maze_distance(my_pos, enemy.get_position()) for enemy in active_enemies])
-            if min_distance <= 4:
-                features['distance_to_active_ghost'] = 1.0 / min_distance  # Higher if closer
+        # CAPSULES
+        capsules = self.get_capsules(successor)
+        if len(capsules) > 0:
+            min_capsule_distance = min([self.get_maze_distance(my_pos, capsule) for capsule in capsules])
+            if normal_defenders: # only interested in capsules if there are non-ghost enemies I can see
+                features['distance_to_capsule'] = min_capsule_distance
+
+        # MOVEMENT
+        features['stop'] = 1 if action == Directions.STOP else 0
+        reverse = Directions.REVERSE[game_state.get_agent_state(self.index).configuration.direction]
+        features['reverse'] = 1 if action == reverse else 0
+
+        if my_pos in self.previous_positions[-5:]:  # TODO: Check more or less than 5 positions?
+            features['revisit'] = 1
+
+        escape_actions = len([a for a in successor.get_legal_actions(self.index) if a != Directions.STOP])
+        features['limited_escape'] = 1 if escape_actions <= 2 else 0
+
+        # RETURN STRATEGY
+        if my_state.is_pacman and my_state.num_carrying > 0:
+            boundary_x = (game_state.data.layout.width // 2) - 1 if self.red else (game_state.data.layout.width // 2)
+            boundary_positions = []
+
+            for y in range(game_state.data.layout.height):
+                if not game_state.has_wall(boundary_x, y): # !!!
+                    boundary_positions.append((boundary_x,y))
+
+            boundary_distances = [self.get_maze_distance(my_pos, pos) for pos in boundary_positions]
+            min_boundary_distance = min(boundary_distances)
+
+            return_factor = my_state.num_carrying
+
+            if my_state.num_carrying >= 3 or (normal_defenders and min(normal_defender_distances) < 4):
+                score = self.get_score(game_state)
+                if score < 0:
+                    # More aggressive return factor when losing
+                    return_factor = my_state.num_carrying * 3
+                else:  # Winning or tied
+                    return_factor = my_state.num_carrying * 1.5
+
+            features['return_with_food'] = min_boundary_distance * return_factor
+
+        # DEFENSE STRATEGY
+        features['defensive'] = 0
+        if score >= 5 and invaders and my_state.scared_timer > 0 and my_state.is_pacman == False:
+            features['defensive'] = 1
+            features['scared_of_invader'] = 1
+
+            if min(invader_distances) < 3:
+                features['distance_to_invader'] = 3
             else:
-                features['distance_to_active_ghost'] = 0
-        else:
-            features['distance_to_active_ghost'] = 0
-
-        # If we are pacman and carrying 4 food, prioritize returning to our side
-        if my_state.is_pacman and my_state.num_carrying == 4:
-            mid_x = game_state.data.layout.width // 2 - (0 if self.red else 1) # midline
-            depth_into_enemy = abs(my_pos[0] - mid_x)
-            features['distance_to_midline'] = depth_into_enemy * (1.7 * my_state.num_carrying)
-
-        # stolen from defender
-        if action == Directions.STOP:
-            features['stop'] = 1
-        rev = Directions.REVERSE[game_state.get_agent_state(self.index).configuration.direction]
-        if action == rev:
-            features['reverse'] = 1
-
-        # If there are capsules and active enemies, prioritize eating them
-        capsule_count = len(self.get_capsules(game_state))
-        if capsule_count > 0 and active_enemies:
-            min_distance = min([self.get_maze_distance(my_pos, capsule) for capsule in self.get_capsules(game_state)])
-            features['distance_to_capsule'] = min_distance
+                features['invader_chase'] = 1 / (1 + min(invader_distances))
+        elif score >= 5 and invaders and my_state.scared_timer == 0 and my_state.is_pacman == False:
+            features['defensive'] = 1
+            features['invader_chase'] = 1 / (1 + min(invader_distances))
 
         return features
 
     def get_weights(self, game_state, action):
-        return {'successor_score': 1000,
-                'distance_to_food': -1,
-                'defender_distance': -10,
-                'distance_to_active_ghost': -50,
-                'stop': -100,
+        features = self.get_features(game_state, action)
+        if features['defensive'] == 0:
+            return {
+                'score': 50,
+                'normal_defender_distance': 5,
+                'scared_defender_distance': -3,
+                'distance_to_food': -3,
+                'eat_food': 20,
+                'stop': -15,
                 'reverse': -5,
-                'distance_to_midline': -40,
-                'distance_to_capsule': -5,
-                'distance_to_scared_ghost': -20,
-                'eat_scared_ghost': 200}
+                'revisit': -13,
+                'invader_distance': -2,
+                'distance_to_capsule': -1,
+                'limited_escape': -3,
+                'return_with_food': -2,
+            }
+        else:
+            return {
+                'distance_to_invader': -100,
+                'invader_chase': 500,
+                'scared_of_invader': 300,
+            }
 
 
 class DefensiveReflexAgent(ReflexCaptureAgent):
@@ -249,11 +281,13 @@ class DefensiveReflexAgent(ReflexCaptureAgent):
     """
 
     def register_initial_state(self, game_state):
-        """Initialiseer de agent en bepaal patrouillepunten."""
+
         super().register_initial_state(game_state)
         self.patrol_points = self.get_dynamic_patrol_points(game_state)
         self.patrol_target = random.choice(self.patrol_points)
         self.initial_capsules = self.get_capsules_you_are_defending(game_state)
+        self.previous_capsules = self.initial_capsules  # Bewaar de beginstaat van de capsules
+        self.scared_timer = 0  # Timer voor de scared status
 
     def get_dynamic_patrol_points(self, game_state):
         """Genereert flexibele patrouillepunten in het midden van de kaart."""
@@ -266,24 +300,15 @@ class DefensiveReflexAgent(ReflexCaptureAgent):
 
         return patrol_positions
 
-    def has_enemy_taken_capsule(self, game_state):
-        """Checkt of er een capsule verdwenen is van onze kant."""
-        current_capsules = self.get_capsules_you_are_defending(game_state)
-        return len(current_capsules) < len(self.initial_capsules)
-
     def get_features(self, game_state, action):
-        """Bepaalt de kenmerken die belangrijk zijn voor de beslissing."""
+
         features = util.Counter()
         successor = self.get_successor(game_state, action)
         my_state = successor.get_agent_state(self.index)
         my_pos = my_state.get_position()
 
         # Basis verdediging
-        features['on_defense'] = 1
-        if my_state.is_pacman:
-            features['on_defense'] = 0
-
-        enemy_has_capsule = self.has_enemy_taken_capsule(game_state)
+        features['on_defense'] = 1 if not my_state.is_pacman else 0
 
         # Vind invaders
         enemies = [successor.get_agent_state(i) for i in self.get_opponents(successor)]
@@ -291,33 +316,29 @@ class DefensiveReflexAgent(ReflexCaptureAgent):
         features['num_invaders'] = len(invaders)
 
         if invaders:
-            # Zoek de dichtstbijzijnde vijand zonder lambda
-            closest_invader = None
-            min_distance = float("inf")
-
-            for invader in invaders:
-                distance = self.get_maze_distance(my_pos, invader.get_position())
-                if distance < min_distance:
-                    min_distance = distance
-                    closest_invader = invader
-
+            # Zoek de dichtstbijzijnde invader
+            distances = [self.get_maze_distance(my_pos, invader.get_position()) for invader in invaders]
+            min_distance = min(distances)
             features['invader_distance'] = min_distance
 
-            # Stop met patrouilleren zodra een vijand wordt gezien!
+            # Stop met patrouilleren zodra een invader wordt gezien
             self.patrol_target = None
 
-            # Bang als vijand een capsule heeft gepakt
-            if enemy_has_capsule:
+            # Controleer de scared status van de agent
+            if my_state.scared_timer > 0:
                 features['scared_of_invader'] = 1
-
-            # Beloning voor indringers pakken (als we niet bang zijn)
-            if my_state.scared_timer == 0 and not enemy_has_capsule:
+                # Zorg ervoor dat de agent op minstens 3 stappen afstand blijft van de invader
+                if min_distance < 3:
+                    features['invader_distance'] = 3  # Houd altijd 3 stappen afstand van de invader
+                else:
+                    features['invader_chase'] = 1 / (1 + min_distance)
+            else:
+                # Als de agent niet bang is, kan hij de invader achtervolgen
                 features['invader_chase'] = 1 / (1 + min_distance)
         else:
-            # Geen vijand? Ga verder met patrouilleren
+            # Geen invaders? Ga verder met patrouilleren
             if self.patrol_target is None or my_pos == self.patrol_target:
                 self.patrol_target = random.choice(self.patrol_points)
-
             features['patrol_distance'] = self.get_maze_distance(my_pos, self.patrol_target)
 
         # Voorkom stilstand en nutteloze bewegingen
@@ -336,8 +357,8 @@ class DefensiveReflexAgent(ReflexCaptureAgent):
             'on_defense': 100,
             'invader_distance': -100,
             'invader_chase': 500,
-            'patrol_distance': -5,
+            'patrol_distance': -10,
             'scared_of_invader': 300,  # Beloning voor vermijden als tegenstander een capsule heeft
             'stop': -100,
-            'reverse': -20
+            'reverse': -50
         }
