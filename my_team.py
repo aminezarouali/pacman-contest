@@ -63,7 +63,6 @@ class ReflexCaptureAgent(CaptureAgent):
     def __init__(self, index, time_for_computing=.1):
         super().__init__(index, time_for_computing)
         self.start = None
-        self.previous_positions = []
 
     def register_initial_state(self, game_state):
         self.start = game_state.get_agent_position(self.index)
@@ -95,11 +94,6 @@ class ReflexCaptureAgent(CaptureAgent):
                     best_action = action
                     best_dist = dist
             return best_action
-
-        my_pos = game_state.get_agent_state(self.index).get_position()
-        self.previous_positions.append(my_pos)
-        if len(self.previous_positions) > 10:  # Keep last 10 positions TODO: is 10 not too much?
-            self.previous_positions.pop(0)
 
         return random.choice(best_actions)
 
@@ -142,81 +136,124 @@ class ReflexCaptureAgent(CaptureAgent):
 
 
 class OffensiveReflexAgent(ReflexCaptureAgent):
-    """
-  A reflex agent that seeks food. This is an agent
-  we give you to get an idea of what an offensive agent might look like,
-  but it is by no means the best or only way to build an offensive agent.
-  """
+    def __init__(self, index, time_for_computing=.1):
+        super().__init__(index, time_for_computing)
+        self.previous_positions = []  # Keep track of previous visited positions
+
+    def choose_action(self, game_state):
+        """
+        Picks among the actions with the highest Q(s,a).
+        """
+        actions = game_state.get_legal_actions(self.index)
+        values = [self.evaluate(game_state, a) for a in actions]
+        max_value = max(values)
+        best_actions = [a for a, v in zip(actions, values) if v == max_value]
+
+        food_left = len(self.get_food(game_state).as_list())
+        if food_left <= 2:
+            best_dist = 9999
+            best_action = None
+            for action in actions:
+                successor = self.get_successor(game_state, action)
+                pos2 = successor.get_agent_position(self.index)
+                dist = self.get_maze_distance(self.start, pos2)
+                if dist < best_dist:
+                    best_action = action
+                    best_dist = dist
+            return best_action
+
+        # Track previous positions
+        my_pos = game_state.get_agent_state(self.index).get_position()
+        self.previous_positions.append(my_pos)
+        if len(self.previous_positions) > 10:  # Keep last 10 positions
+            self.previous_positions.pop(0)
+
+        return random.choice(best_actions)
 
     def get_features(self, game_state, action):
+        """
+        This method returns a dictionary-like object where the keys are feature names and values are the feature values.
+        """
         features = util.Counter()
+
+        # Base variables
         successor = self.get_successor(game_state, action)
-        food_list = self.get_food(successor).as_list()
         my_pos = successor.get_agent_state(self.index).get_position()
         my_state = successor.get_agent_state(self.index)
 
-        # GAME AWARENESS
+        # === GAME AWARENESS ===
+        # Opmerking: achteraf gezien blijkt deze feature niet nuttig te zijn voor de agent. De score teruggeven moedigt de agent niet aan om een specifieke actie te ondernemen. Onze gedachte was om een baseline te geven aan de gewichten zoals we gedaan hadden in een WPO uit het vorig semester.
         score = self.get_score(successor)
         features['score'] = score
 
-        # FOOD
+        # === FOOD ===
+        food_list = self.get_food(successor).as_list()
         current_food_list = self.get_food(game_state).as_list()
         if len(current_food_list) > len(food_list):
-            features['distance_to_food'] = 0 # to stop going back and forth in front of food
-            features['eat_food'] = 10
+            features['distance_to_food'] = 0  # to stop going back and forth in front of food
+            features['eat_food'] = 10  # motivate agent to eat food
 
+        # Minimize distance to food pellets.
         if len(food_list) > 0:
             min_distance = min([self.get_maze_distance(my_pos, food) for food in food_list])
             features['distance_to_food'] = min_distance
 
-        # ENEMIES
+        # === ENEMIES ===
         enemies = [successor.get_agent_state(i) for i in self.get_opponents(successor)]
         defenders = [enemy for enemy in enemies if enemy.get_position() is not None and not enemy.is_pacman]
-        invaders = [enemy for enemy in enemies if enemy.get_position() is not None and enemy.is_pacman]
         scared_defenders = [defender for defender in defenders if defender.scared_timer > 0]
         normal_defenders = [defender for defender in defenders if defender.scared_timer == 0]
+        invaders = [enemy for enemy in enemies if enemy.get_position() is not None and enemy.is_pacman]
 
+        # Minimize distance to invaders if agent is on his side.
         invader_distances = [self.get_maze_distance(my_pos, invader.get_position()) for invader in invaders]
         if invaders and not my_state.is_pacman:
             features['invader_distance'] = min(invader_distances)
 
+        # Minimize distance to defenders who are scared
         scared_defender_distances = [self.get_maze_distance(my_pos, ghost.get_position()) for ghost in scared_defenders]
         if scared_defenders:
             features['scared_defender_distance'] = min(scared_defender_distances)
 
+        # Maximize distance to defenders who are not scared
         normal_defender_distances = [self.get_maze_distance(my_pos, ghost.get_position()) for ghost in normal_defenders]
         if normal_defenders:
             features['normal_defender_distance'] = min(normal_defender_distances)
 
-        # The more food you carry, the more you should stay away from ghosts
+        # The more food you carry, the more you should stay away from non-scared ghosts
         if my_state.num_carrying > 0:
             features['normal_defender_distance'] *= my_state.num_carrying * 1.2
 
-        # CAPSULES
+        # === CAPSULES ===
+        # Minimize distance to capsules if we can see non-scared ghosts
         capsules = self.get_capsules(successor)
         if len(capsules) > 0:
             min_capsule_distance = min([self.get_maze_distance(my_pos, capsule) for capsule in capsules])
             if normal_defenders: # only interested in capsules if there are non-ghost enemies I can see
                 features['distance_to_capsule'] = min_capsule_distance
 
-        # MOVEMENT
+        # === MOVEMENT ===
+        # Discourage stopping and reversing
         features['stop'] = 1 if action == Directions.STOP else 0
         reverse = Directions.REVERSE[game_state.get_agent_state(self.index).configuration.direction]
         features['reverse'] = 1 if action == reverse else 0
 
-        if my_pos in self.previous_positions[-5:]:  # TODO: Check more or less than 5 positions?
+        # Discourage revisting previous positions
+        if my_pos in self.previous_positions[-5:]:
             features['revisit'] = 1
 
+        # Discourage choosing actions that have dead ends
         escape_actions = len([a for a in successor.get_legal_actions(self.index) if a != Directions.STOP])
         features['limited_escape'] = 1 if escape_actions <= 2 else 0
 
-        # RETURN STRATEGY
+        # === RETURN STRATEGY ===
+        # Cross the boundary if carrying food
         if my_state.is_pacman and my_state.num_carrying > 0:
             boundary_x = (game_state.data.layout.width // 2) - 1 if self.red else (game_state.data.layout.width // 2)
             boundary_positions = []
 
             for y in range(game_state.data.layout.height):
-                if not game_state.has_wall(boundary_x, y): # !!!
+                if not game_state.has_wall(boundary_x, y):
                     boundary_positions.append((boundary_x,y))
 
             boundary_distances = [self.get_maze_distance(my_pos, pos) for pos in boundary_positions]
@@ -234,7 +271,9 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
 
             features['return_with_food'] = min_boundary_distance * return_factor
 
-        # DEFENSE STRATEGY
+        # === DEFENSE STRATEGY ===
+        # Play defensive if winning significantly, there are invaders you can see
+        # This code is a copy from the defensive agent
         features['defensive'] = 0
         if score >= 5 and invaders and my_state.scared_timer > 0 and my_state.is_pacman == False:
             features['defensive'] = 1
@@ -244,6 +283,7 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
                 features['distance_to_invader'] = 3
             else:
                 features['invader_chase'] = 1 / (1 + min(invader_distances))
+
         elif score >= 5 and invaders and my_state.scared_timer == 0 and my_state.is_pacman == False:
             features['defensive'] = 1
             features['invader_chase'] = 1 / (1 + min(invader_distances))
@@ -251,10 +291,14 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
         return features
 
     def get_weights(self, game_state, action):
+        """
+        This method returns a dictionary where the keys are feature names and values are the feature weights.
+        """
         features = self.get_features(game_state, action)
+
         if features['defensive'] == 0:
             return {
-                'score': 50,
+                # 'score': 50,
                 'normal_defender_distance': 5,
                 'scared_defender_distance': -3,
                 'distance_to_food': -3,
@@ -276,19 +320,11 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
 
 
 class DefensiveReflexAgent(ReflexCaptureAgent):
-    """
-    Een defensieve agent die zich aanpast wanneer een power capsule is gepakt.
-    """
-
     def register_initial_state(self, game_state):
 
         super().register_initial_state(game_state)
         self.patrol_points = self.get_dynamic_patrol_points(game_state)
         self.patrol_target = random.choice(self.patrol_points)
-        self.initial_capsules = self.get_capsules_you_are_defending(game_state)
-        self.previous_capsules = self.initial_capsules  # Bewaar de beginstaat van de capsules
-        self.scared_timer = 0  # Timer voor de scared status
-
     def get_dynamic_patrol_points(self, game_state):
         """Genereert flexibele patrouillepunten in het midden van de kaart."""
         mid_x = (game_state.data.layout.width // 2) - 1 if self.red else (game_state.data.layout.width // 2)
